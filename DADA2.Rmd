@@ -1,0 +1,508 @@
+---
+title: "R tools for micorbiota profiling"
+author: "Jakub Kreisinger"
+date: "May 27, 2019"
+output: html_document
+---
+
+#Introduction
+This tutorial presents several R packages for bioinformatics processing of amplicon sequencing data and their subsequent statistical analyzes. Despite certain limitations, amplicon sequencing is a widely used, cost-effective approach for analyzing ecological communities, e.g., bacterial and fungal microbiota, diet composition, etc. Nevertheless, amplicon sequencing can also be used for [other types of research](https://www.ncbi.nlm.nih.gov/pubmed/29772096).<br />
+Bioinformatics pipelines for amplicons are often quite complicated and require the installation of various software packages. Many of them only work on UNIX based operating systems, which can be a significant limitation for some users. The workflow presented in this tutorial shows how to process primary amplicon sequencing data (in fastq format) using only the features of the R environment.  
+
+#Prerequisites 
+R Software and R Studio should be installed on your computer (with a common operating system, ~ 8G RAM memory and about 2.5G free space on the hard disk). An internet connection is required for downloading sequencing data and installing R packages, but not for the analyzes themselves.   
+
+#About data
+We will compare microbiota samples from inbred mice of strain C57Bl/6J collected in the cecum and ileum. Amplicons covering the V3-V4 region of bacterial 16S rRNA were prepared using  [“two-step PCR” approach](https://support.illumina.com/documents/documentation/chemistry_documentation/16s/16s-metagenomic-library-prep-guide-15044223-b.pdf). PCR duplicates were prepared for each sample to evaluate PCR stochasticity. Libraries were sequenced on Illumina MiSeq (300 bp paired-end reads). 
+
+#Required files
+*FASTQ* – folder containing fastq files. PCR primers were already trimmed using. [skewer](https://bmcbioinformatics.biomedcentral.com/articles/10.1186/1471-2105-15-182).<br /> 
+*META* – folder containing sample metadata (i.e. information on individual identity and gut section for each sample), gg_13_8_train_set_97.fa.gz (Green Genes training database for taxonomic assignment).<br /> 
+*SCRIPTS* – folder containing scripts for this tutorial.<br />
+
+# 1. Instalation of required packages
+This part can be skipped if all these packages have already been installed. Otherwise, comment out these lines and run the script.
+```{r}
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("ShortRead")
+# BiocManager::install("dada2", version = "3.9")
+# BiocManager::install("DECIPHER")
+# BiocManager::install('phyloseq')
+
+
+# install.packages("picante")
+# install.packages("ape")
+# install.packages("vegan")
+# install.packages("ggplot2")
+# install.packages("lme4")
+# install.packages("lmerTest")
+```
+
+Now we will load desired packages using **library()** command. Specifically:<br />
+
+**ShortRead** - package for manipulation with sequencing data<br />
+**dada2** - denoising of amplicone data, taxonomic classification of resulting haplotypes<br />
+**phyloseq** - construction of unified database from metabarcoding data<br />
+**DECIPHER** - alignments, phylogenetic analyzes etc.<br />
+**picante** - community analyzes that can account for phylogeny of community members<br />
+**vegan** - for traditional community analyzes <br />
+**ggplot2** - for graphical outputs<br />
+**ape** - for phylogenetic trees <br />
+
+Check if all packages were loaded. Otherwise some parts of this tutorial will not work.
+```{r message=F, warning=F}
+library(ShortRead)
+library(dada2)
+library(phyloseq)
+library(ggplot2)
+library(vegan)
+library(DECIPHER)
+library(ape)
+library(picante)
+library(lme4)
+library(lmerTest)
+```
+
+We will also need a few custom functions to go thought this tutorial (explained later):
+```{r message=F, warning=F}
+dupl.concensus<-function(PHYLOS,NAMES){
+  
+  # exclude nonduplicated samples
+  IDS<-as.character(data.frame(sample_data(PHYLOS))[,NAMES])
+  IDS.dupl<-IDS[duplicated(IDS)]
+  
+  PHYLOSEQ<-prune_samples(IDS%in%IDS.dupl, PHYLOS)
+  if(length(IDS.dupl)*2<length(IDS)) {NONUPLICATED<-prune_samples(!IDS%in%IDS.dupl, PHYLOS)
+                                       print(paste("Following names are nonduplicated",sample_names(NONUPLICATED)))}
+  
+  CATS<-as.character(data.frame(sample_data(PHYLOSEQ))[,NAMES])
+  CATS2<-levels(factor(CATS))
+  OTU_TAB<-otu_table(PHYLOSEQ)
+  rownames(OTU_TAB)<-CATS
+  
+  # i<-5
+  for (i in 1:length(CATS2))
+  {
+    # print(CATS2[i])
+    FILTER.act<-colSums(OTU_TAB[rownames(OTU_TAB)==CATS2[i],]>0)>1
+    OTU_TAB[rownames(OTU_TAB)==CATS2[i],]
+    OTU_TAB[rownames(OTU_TAB)==CATS2[i],]<-t(apply(OTU_TAB[rownames(OTU_TAB)==CATS2[i],],1,function(x) x*FILTER.act))
+  }
+  
+  rownames(OTU_TAB)<-sample_names(PHYLOSEQ)
+  otu_table(PHYLOSEQ)<-OTU_TAB
+  PHYLOSEQ.clean<-prune_taxa(taxa_sums(PHYLOSEQ)>0,PHYLOSEQ)
+  
+  PHYLOSEQ.clean
+}
+
+merge.duplicates<-function(PHYLOSEQ,NAMES){
+  CATS<-as.character(data.frame(sample_data(PHYLOSEQ))[,NAMES])
+  sample_data(PHYLOSEQ)$duplic.id<-CATS
+  SAMDAT<-sample_data(PHYLOSEQ)
+  SAMDAT.sub<-subset(SAMDAT,duplicated(CATS)==F)
+  FASTA<-refseq(PHYLOSEQ)
+  rownames(SAMDAT.sub)<-SAMDAT.sub$duplic.id
+  PHYLOSEQ.merge<-merge_samples(PHYLOSEQ,"duplic.id")
+  sample_data(PHYLOSEQ.merge)<-SAMDAT.sub
+  PHYLOSEQ.merge<-merge_phyloseq(PHYLOSEQ.merge,FASTA)
+  PHYLOSEQ.merge
+}
+
+```
+
+Now we have to change **PATH** to folder including fastq files (FASTQ):
+```{r setup}
+PATH<-"V:/151/Radka/NARKO nová sekvenace (všichni pacienti a kontroly)/NARKO FASTAQ"
+knitr::opts_knit$set(root.dir = PATH )
+```
+
+#2. Quality assessment and filtering of sequencing data
+
+##2.1. Data exploration using ShortRead package
+**list.files()** return list of fastq files in working directory. We can load these files using **ShortRead::readFastq()** and access individual components of the file as shown bellow.  
+<- is assign operator in R. it can assign a value to a name.
+```{r}
+list.files()
+FASTQ<-readFastq("ACTGAGCG_ACTCTAGG_F_trus3R_trus-pair1.fastq.gz")
+length(FASTQ) #number of sequences in the file
+head(width(FASTQ)) # number of nucleotides in each sequence
+head(sread(FASTQ)) # Nucleoides
+head(quality(FASTQ)) #Quality scores
+
+#Select all reads starting with G
+FASTQ.sub<-FASTQ[grep("^G",as.character(sread(FASTQ)))]
+sread(FASTQ.sub)
+
+```
+
+#Downsizing fastq files. 
+This script selects only the first 1000 sequences from each fastq file. Uncomment following lines if there are problems with RAM or computation time.
+```{r}
+# LIST<-list.files()
+# LIST<-LIST[grep("pair[1-2].fastq.gz",LIST)]
+# i<-1
+# for(i in 1:length(LIST)){
+#   FASTQ<-readFastq(LIST[i])
+#   FASTQ<-FASTQ[1:1000]
+#   file.remove(LIST[i])
+#   writeFastq(FASTQ,file = LIST[i],mode="w")
+# }
+```
+
+##2.1. Graphical assesment of quality profiles
+**plotQualityProfile()** plot the numerical values of the quality scores in each position. Color darkness indicate frequency of occurrence. To speed up the calculation, we will do this only for the first ten fastq files (i.e., *[1:10]*). The quality decreases more at the 3' end of the reverse reads.   
+```{r}
+LIST<-list.files()
+
+F_reads<-LIST[grep("pair1.fastq.gz",LIST)]
+R_reads<-LIST[grep("pair2.fastq.gz",LIST)]
+
+plotQualityProfile(F_reads[1:10],aggregate = TRUE)+ggtitle("Forward reads")
+plotQualityProfile(R_reads[1:10],aggregate = TRUE)+ggtitle("Reverse reads")
+
+```
+
+##2.2. Quality filering
+Quality scores are exponentially related to [probability od sequencing errors](https://en.wikipedia.org/wiki/FASTQ_format); i.e mostly substitution errors in the case of our Illumina data. To reduce noise in our data, we should eliminate sequences of low quality before taking further steps. There are many approaches that aim at quality filtering. They usually combine [A] eliminating sequences whose average quality is low, [B] trimming/filtering sequences when the quality falls below a certain level within a sliding window, [C] trimming low quality 3' ends, and other parameters. Sequence filtering based on the maximum expected errors within reads has been proposed as [the most transparent approach for amplicine data](https://academic.oup.com/bioinformatics/article/31/21/3476/194979).<br />
+We will trim forward and reverse reads at the 270th and 200th nucleotides respectively i.e., *truncLen = c(270,200)*) and eliminate all shorter sequences (i.e., *minLen = c(270,200)*). Since our amplicons are shorter than 420 bp, we have >25 bp of overlap after trimming. We also delete all reads with an unassigned nucleotide (i.e. *maxN=0*). Next, we calculate the expected number of errors per paired-end read and only reads with less than one expected error are retained (i.e. maxEE=1). This is done with the **fastqPairedFilter()** function. The **for()** loop iterates through the list of fastq files, allowing quality filtering to be performed automatically for each sample. 
+
+```{r}
+#list of samples (character vector)
+sample.names<-gsub("-pair1.fastq.gz","",F_reads)
+# head(sample.names)
+
+#list of names for filtered fastq files
+filtFs <- paste0(sample.names, "_pair1_filt.fastq.gz")
+filtRs <- paste0(sample.names, "_pair2_filt.fastq.gz")
+# head(filtFs)
+
+#For loop for the quality filtering step
+# maxN = since dada does not allow "N" this step will after shortening discard sequences with more than maxN.
+# Exprected errors (EE) are calculated from quality score (Q). EE = sum(10^(-Q/10))
+# maxEE =  After shortening, reads with higher than maxEE "expected errors" will be discarded.
+# minQ = After shortening, reads contain a quality score less than minQ will be discarded.
+# truncQ = Truncate reads at the first instance of a quality score less than or equal to truncQ.
+# compress = Default TRUE. If TRUE, the output fastq file(s) are gzipped.
+# verbose = Whether to output status messages.
+# minLen = Remove reads with length less than minLen. minLen is enforced after trimming and shortening.
+# truncLen = Truncate reads after truncLen bases. Reads shorter than this are discarded.
+
+for(x in 1:length(F_reads)) {
+  print(sample.names[x])
+  fastqPairedFilter(c(F_reads[x], R_reads[x]), c(filtFs[x], filtRs[x]),
+                    maxN=0, maxEE=1, minQ=2,truncQ=2,
+                    compress=TRUE, verbose=TRUE,
+                    minLen = c(270,200),truncLen = c(270,200))
+}
+
+```
+
+#3. Data denoising by dada2 package
+Even after quality filtering, significant sequencing (and PCR) noise remains. To address this problem, amplicon sequencing data are usually clustered into so-called *Operational Taxonomic Units* (OTUs), which are considered homogeneous bins for further analysis. However, this approach comes with some concerns. For example, ecologically significant variants may have lower similarity than the established threshold for clustering. To address these concerns, several approaches have been developed that are independent of similarity-based clustering, such as [dada2](https://www.nature.com/articles/nmeth.3869). Instead of sequence similarity-based clustering, dada2 attempts to identify and fix all errors that occur during the sequencing process. The result of this process should be a catalog of all 'true' hapotypes (hereafter Amplicone Sequence Variants; ASVs) in the dataset (as well as information about their frequency in individual samples).
+
+##3.1. Estimation of error rates from sequing data
+**learnErrors()** is a machine learning technique that estimates the frequency of all possible transition states as a function of quality scores. To obtain a reasonable computation time, we will estimate the frequency of errors using only the first 100,000 reads (i.e., *nreads = 1e+05*). 
+```{r}
+errF <- learnErrors(filtFs, multithread=TRUE,nreads = 1e+05)
+errR <- learnErrors(filtRs, multithread=TRUE,nreads = 1e+05)
+
+plotErrors(errF)
+```
+
+##3.2. Dereplication of fastq files
+To run dada2, we need dereplicated fastq files, i.e., we check fastq files for identical sequences and keep only unique variants in each sample.
+
+```{r}
+derepF<-derepFastq(filtFs)
+derepR<-derepFastq(filtRs)
+
+```
+
+##3.3. Dada denoising
+Now we will use the dereplicated data and the parameterized error model (i.e., *errF* and *errR*) to run data2, i.e., to correct sequencing errors and identify relevant variants (ASVs) within each sample. 
+```{r}
+dadaFs <- dada(derepF, err=errF, multithread=TRUE,verbose = FALSE)
+dadaRs <- dada(derepR, err=errR, multithread=TRUE,verbose = FALSE)
+
+```
+
+##3.4. Merging of denoised reads
+Forward and reverse parts of denoised haplotypes are merged based on their overlapping regions. Haplotypes for which this is not possible due to short overlaps (*minOverlap = 15*) or the presence of mismatches in the overlapping region (*maxMismatch = 0*) are eliminated.
+```{r}
+mergers <- mergePairs(dadaFs, derepF, dadaRs, derepR, verbose=TRUE, minOverlap = 15, maxMismatch = 0)
+# Inspect the merged data.frame from the first sample
+head(mergers[[1]])
+```
+
+##3.4. Abundance matrix
+The **makeSequenceTable()** function takes the results of the previous step and creates an abundance matrix (i.e., a. otu table) with the ASVs in columns and the samples in rows. The number of sequences in the cells represents the abundance of each ASV in the samples.
+```{r}
+seqtab <- makeSequenceTable(mergers)
+head(colnames(seqtab))
+head(rownames(seqtab))
+```
+
+##3.5. Detection of chimeric sequnences
+Chimeric variants are common nonbiological artifacts associated with [PCR rather than sequencing errors](https://genome.cshlp.org/content/21/3/494.full). They should be removed from the dataset to avoid biased results. This can be done using chimera-free reference databases or de novo. In the latter case, low-frequency ASVs are assumed to be more likely of chimeric origin, and they are compared against abundant ASVs. Dada2 uses a modification of this approach, i.e., it tries to find breakpoints in low-frequency ASVs and split them into two parts that perfectly match two different high-frequency ASVs. It should be noted that this approach [eliminates true haplotypes](https://www.nature.com/articles/s41598-018-24126-3) under certain circumstances (which is not desirable).
+ 
+
+Most haplotypes were found to be chimeric. Nevertheless, they were represented by a relatively small proportion of all reads (~14%).
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+1-sum(seqtab.nochim)/sum(seqtab) #proportion of chimeric sequences
+```
+
+##3.5. Taxonomy
+Finally, we will assign the taxonomy of each ASV. To speed up this process, we will use the [Greengenes database] (https://greengenes.secondgenome.com/). You may also use other existing and probably better [alternatives](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5374703/). 
+ 
+We will use the R implementation of [RDP classifier](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1950982/). This is a [naive-Bayesian classifier](https://en.wikipedia.org/wiki/Naive_Bayes_classifier) that computes the probability of belonging to a particular taxonomic cluster based on the frequency of ASVs fragments (called words) in the training dataset. A similar approach is commonly used in other applications outside bioinformatics, for example, spam detection. 
+
+```{r}
+taxa <- assignTaxonomy(seqtab.nochim, "../META/gg_13_8_train_set_97.fa.gz", multithread=TRUE, minBoot = 80)
+```
+
+#4 Introducing phyloseq package
+The [phyloseq](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0061217) package allows the construction of a unified database in which all relevant results of the metabarcoding 'experiment' are stored: Abundance matrix, haplotype sequences, their taxonomy, phylogeny and sample metadata. It also supports manipulation with the resulting database (i.e. subsetting, data transformation, etc.) and exploratory graphical analyzes. In addition, phyloseq can be used to easily prepare inputs for various statistical analyzes.
+
+##4.1 Construction of phyloseq database
+Here we will merge the abundance matrix, ASV taxonomy, and sample metadata (i.e. information on gut sections and individual identity). For simplicity, we will also change the ASV names (which originally corresponded to the DNA sequences).
+
+```{r}
+#Load sample metadata
+SAMPLE_DATA<-read.delim("../META/metadata.txt",header = T, stringsAsFactors = F)
+head(SAMPLE_DATA)
+SAMPLE_DATA<-sample_data(SAMPLE_DATA)
+
+#Modify sample names in seqtab.nochim
+rownames(seqtab.nochim)<-gsub("_pair1_filt.fastq.gz","-",rownames(seqtab.nochim))
+otutab<-otu_table(seqtab.nochim,taxa_are_rows = F)
+
+#Taxonomy
+taxa<-tax_table(taxa)
+
+#Haplotype sequences
+FASTA<-DNAStringSet(colnames(otutab))
+names(FASTA)<-colnames(otutab)
+
+#Merge taxonomy, sample data and abundance matrix
+PHYLOSEQ<-merge_phyloseq(SAMPLE_DATA,otutab,taxa,FASTA)
+
+#Rename haplotypes
+taxa_names(PHYLOSEQ)<-paste("HAPLO",1:length(taxa_names(PHYLOSEQ)),sep = "_")
+head(paste("HAPLO",1:length(taxa_names(PHYLOSEQ)),sep = "_"))
+
+save(PHYLOSEQ,file = "../PHYLOSEQ.R")
+```
+
+##4.2. Basic phyloseq functionalities
+Here is a demonstration of phyloseq database subseting and data transformation:
+
+```{r warning=F,message=F}
+load("../PHYLOSEQ.R")
+PHYLOSEQ
+
+head(tax_table(PHYLOSEQ))
+otu_table(PHYLOSEQ)[1:5,1:5]
+
+head(sample_sums(PHYLOSEQ))
+head(taxa_sums(PHYLOSEQ))
+
+CAECAL.subset<-prune_samples(sample_data(PHYLOSEQ)$sample_type=="CAE",PHYLOSEQ) #select only cecal samples
+CLOSTRIDIA.subset<-prune_taxa(as.logical(tax_table(PHYLOSEQ)[,3]=="c__Clostridia"),PHYLOSEQ) #select only clostridia
+
+PHYLOSEQ.prop<-transform_sample_counts(PHYLOSEQ,function(x) x/sum(x)) #transfor read counts to proportions
+otu_table(PHYLOSEQ.prop)[1:5,1:5]
+
+PHYLOSEQ.prev<-transform_sample_counts(PHYLOSEQ,function(x) ifelse(x>0,1,0)) #transfor read counts to presence/absence
+otu_table(PHYLOSEQ.prev)[1:5,1:5]
+
+PHYLOSEQ.rare<-rarefy_even_depth(PHYLOSEQ) #random subsample of original database. All samples will have same number of reads 
+head(sample_sums(PHYLOSEQ.rare))
+```
+
+##4.3. Testing consitecy in diversity between technical duplicates
+Individual sample identities (i.e. a given gut section for each individual) are stored in the * ID _individual* column of the sample metadata. Duplicate IDs indicate PCR duplicates for each sample. First, we will use the **duplicate()** function to identify PCR duplicates. Then, **prune_samples()** will isolate the first and second PCR duplicates in separate phyloseq databases. Various diversity indices (see below) are calculated with **estimate_richness()** and their correlation between duplicates is tested with Pearson correlation; function **cor.test()**. 
+
+```{r warning=F,message=F}
+DUPLICATED<-duplicated(sample_data(PHYLOSEQ)$ID_individual)
+dupl.1<-prune_samples(DUPLICATED==T,PHYLOSEQ)
+dupl.2<-prune_samples(DUPLICATED==F,PHYLOSEQ)
+
+#richness calsulation
+DIV1<-estimate_richness(dupl.1)
+DIV2<-estimate_richness(dupl.2)
+
+#merge sample data with diversity indexes
+DIV1<-data.frame(DIV1,sample_data(dupl.1))
+DIV2<-data.frame(DIV2,sample_data(dupl.2))
+
+DIV2<-DIV2[match(DIV1$ID_individual, DIV2$ID_individual),]
+
+#Pearson correlation
+cor.test(DIV1$Shannon,DIV2$Shannon)
+
+
+plot(DIV1$Shannon,DIV2$Shannon,pch=16,main="Diversity in paired duplicates")
+```
+
+##4.3. Testing consitecy in composition between technical duplicates
+A complementary approach is used to assess whether PCR stochasticity (and other sources of noise) affects the consistency of the relative abundance of ASVs between PCR duplicates. First, we will quantify the differences in the composition of ASVs between samples in the first and second PCR replicates. For this purpose, the [Bray-Curtis dissimilarities](https://en.wikipedia.org/wiki/Bray%E2%80%93Curtis_dissimilarity) are calculated via **vegan::vegdist()**. Then, the dissimilarities between the samples of the first and second PCR replicates are plotted against each other and their correlation is tested using the Mantel test (**mantel ()**). However, using the Mantel correlation, it would be difficult to detect problematic samples in case of inconsistency. Therefore, we use the **vegan::protest()** function for [Procrustean superimposition](https://en.wikipedia.org/wiki/Procrustes_analysis) as a complementary approach.
+
+```{r warning=F,message=F}
+#Bray-Curtis dissimilarities
+BC1<-as.matrix(vegdist(otu_table(transform_sample_counts(dupl.1,function(x) x/sum(x)))))
+BC2<-as.matrix(vegdist(otu_table(transform_sample_counts(dupl.2,function(x) x/sum(x)))))
+BC2[1:7,1:7]
+
+rownames(BC1)<-colnames(BC1)<-sample_data(dupl.1)$ID_individual
+rownames(BC2)<-colnames(BC2)<-sample_data(dupl.2)$ID_individual
+
+BC2<-BC2[rownames(BC1),rownames(BC1)]
+
+#Mantel correlation
+plot(BC1,BC2, main="B-C dissimilarities for 1st vs. 2nd replacate")
+mantel(BC1,BC2)
+
+#PCoA scaling prior Procrustes analysis
+BC1.pcoa<-cmdscale(as.dist(BC1))
+BC2.pcoa<-cmdscale(as.dist(BC2))
+
+#Procrustes analysis
+PROT<-protest(BC1.pcoa,BC2.pcoa)
+PROT
+plot(PROT)
+
+```
+
+#5. Further quality control steps
+Sequencing of negative and positive controls ("mock communities" with known composition) is strongly recommended. Samples can be contaminated by bacterial DNA present in laboratory kits or in the environment during sample collection and analysis. Contaminants have a greater effect on samples with low DNA concentrations. Eliminating potential contaminants therefore helps to separate the true signal in the data from the non-biological noise. Although there are excellent tools for this [purpose] (https://microbiomejournal.biomedcentral.com/articles/10.1186/s40168-018-0605-2), we will not do so here.
+ 
+
+In the next lines, we will delete all hapotypes that were not consistently detected in both PCR replicates using custom function **dupl.consensus()**. We will then use **merge.duplicates()** to create consensual profiles for use in subsequent analyses. We see that this step eliminated a relatively high proportion of ASVs, although their overall frequency in our data was rather low (~3% of all reads).
+
+```{r warning=F,message=F}
+PHYLOSEQ.merged<-dupl.concensus(PHYLOS = PHYLOSEQ,NAMES="ID_individual")
+PHYLOSEQ.merged<-merge.duplicates(PHYLOSEQ = PHYLOSEQ.merged,NAMES = "ID_individual")
+
+PHYLOSEQ.merged
+1-sum(otu_table(PHYLOSEQ.merged))/sum(otu_table(PHYLOSEQ))
+
+```
+
+We can also filter ASVs that are not *priority* for us. In the case of our data, we will remove all *chloroplast* ASVs and ASVs that have not been assigned to a known bacterial phylum.
+```{r warning=F,message=F}
+FILTER.chloro<-as.logical(tax_table(PHYLOSEQ.merged)[,3]=="Chloroplast")
+FILTER.chloro[is.na(FILTER.chloro)]<-TRUE
+FILTER.unassign<-as.logical(is.na(tax_table(PHYLOSEQ.merged)[,2]))
+FILTER<-FILTER.chloro+FILTER.unassign==0
+
+PHYLOSEQ.merged<-prune_taxa(FILTER,PHYLOSEQ.merged)
+```
+
+#6 Phylogeny
+In this step, we will estimate the phylogeny of 16S rRNA ASVs, which may be useful for later analyzes. There are several reasons for this. For example, multiple copies of the 16S rRNA gene are typically present in bacterial genomes and these copies usually have high sequence similarity. In addition, some functional properties of bacteria are usually similar in phylogentically related bacteria.
+ 
+[PyNAST](https://www.ncbi.nlm.nih.gov/pubmed/19914921) reference-based alignment is usually used to identify homologous positions of 16S reads. Since this software is not implemented in R, we will use **DECIPER::AlignSeqs()** de nonv aligner for ASVs alignment. Mutation rates are higher in hypervariable regions of the 16S gene than in conserved regions. Therefore, we will convert the DNA sequences of ASVs into RNA, allowing **AlignSeqs()** to predict the secondary structure in the nucleotide chain and use this information during the alignment process. Supposedly incorrect homologies are corrected by **StaggerAlignment()**. Next, we calculate the distance matrix (**DistanceMatrix()**) for the aligned sequence and eliminate poorly aligned sequences (based on the sums of their distances; **rowSums() < 200**). Finally, we construct a simple Neighbor-Joining tree with **IdClusters()** and merge it with our phyloseq database (**merge_phyloseq()**). As the resulting plot (**plot_tree()**) shows, our phylogenetic reconstruction is not perfect, but probably good enough for later analyzes.
+
+```{r warning=F,message=F}
+#Alignment
+dna<-refseq(PHYLOSEQ.merged)
+rna<-RNAStringSet(dna)
+aligned <- AlignSeqs(rna,iterations = 10,refinements = 10, verbose = F)
+aligned_staggered <- StaggerAlignment(aligned,verbose = F)
+
+#Save Alignment
+writeFasta(DNAStringSet(aligned_staggered),"~/aligned.fasta")
+
+#identify and filter poorly aligned reads
+FILTER<-rowSums(DistanceMatrix(aligned_staggered,verbose = F))<200
+aligned_staggered.filt<-aligned_staggered[FILTER]
+
+#
+DIST<-DistanceMatrix(aligned_staggered.filt,correction = "Jukes-Cantor",verbose = F)
+tree<-IdClusters(myDistMatrix = DIST,myXStringSet = aligned_staggered.filt,method = "NJ",type = "dendrogram",showPlot = F,verbose = F)
+
+#merge tree with phyloseg
+tree<-as.phylo(as.hclust(tree))
+PHYLOSEQ.merged.tree<-merge_phyloseq(PHYLOSEQ.merged,tree)
+
+#plot tree
+plot_tree(PHYLOSEQ.merged.tree,  ladderize="left", color="Phylum")
+```
+
+#7. Alpha diversity
+It is less likely that rare ASVs will be detected in samples with low sequencing coverage. Therefore, normalization of data or transformation of sequence counts should be performed. Alternatively, methods that explicitly account for variations in sequencing coverage can be used. Here, we normalize the number of reads by rarefaction (**rarefy_even_depth()**), i.e., by randomly subsampling reads to obtain the same number of reads per sample. Note, however, that this approach has recently been [criticized](https://www.ncbi.nlm.nih.gov/pubmed/24699258?dopt=Abstract). To compare the [alpha diversity](https://en.wikipedia.org/wiki/Alpha_diversity) of the microbiota in the cecum and ileum, we calculate several alpha diversity indices using **estimate_richness()**. In addition, the diversity of haplotypes, weighted by their phylognetic relatedness, is calculated with **picante::pd()**. In addition to the total number of haplotypes in the given sample (*Observed*), the total number of haplotypes in the subsequenced profiles can be predicted (e.g., with *chao1* or * ACE *) or the diversity can be weighted by the relative abundances of the haplotypes in the given sample (e.g., with *Shannon*).
+ 
+If we use **pairs()** for the commonly used alpha-divergence measures, we see that the observed number of haplotypes is strongly correlated with the estimates of total diversity (*chao1*) and the "correction" for haplotype phylogeny has no appreciable effect. However, if we give less weight to the rare haplotypes (using *Shannon*), we see a slightly different pattern. Finally, we will use **ggplot()** to depict and compare the variation in alpha diversity in the two gut sections.
+
+```{r warning=F,message=F}
+#rarefaction
+PHYLOSEQ.merged.tree.rare<-rarefy_even_depth(PHYLOSEQ.merged.tree)
+#alpha diversity calcualtion
+RICH<-estimate_richness(PHYLOSEQ.merged.tree.rare)
+#phylogenetic diversity
+PD<-pd(samp = as.data.frame(otu_table(PHYLOSEQ.merged.tree.rare)),tree = phy_tree(PHYLOSEQ.merged.tree))
+RICH$PD<-PD$PD
+#comparission of diversity indexes
+pairs(data.frame(RICH$Observed,RICH$Chao1,RICH$Shannon,RICH$PD))
+RICH<-data.frame(RICH,sample_data(PHYLOSEQ.merged.tree.rare))
+
+#diversity variation in caecum and illeum
+ggplot(data=RICH,aes(y=Shannon,x=sample_type))+geom_boxplot()+geom_jitter()+ggtitle("Shannon diversity")
+ggplot(data=RICH,aes(y=Observed,x=sample_type))+geom_boxplot()+geom_jitter()+ggtitle("No. of observed haplotypes")
+
+
+#Mixed models
+INDIVIDUAL<-sapply(strsplit(RICH$ID_individual, "_"), function(x) x[1], simplify=T)
+RICH$Ind<-INDIVIDUAL
+model<-lmer(Shannon~sample_type+(1|Ind),data=RICH)
+summary(model)
+```
+
+#9. Class-level composition
+Using barplots, we can compare differences in proportions of dominating bacterial classes in cecum and ileum. We will merge sequence counts for haplotypes according to their Class level identity using **tax_glom()**. Next, we will select only bacterial Classes represented by at least 10,000 sequences using **prune_taxa()**. **psmelt()** will construct data.frame for barplot that we draw using **ggplot**.
+Using linear mixed models (**lmer** functions), we compare alpha diversity between the two gut sections. Individual identity is included as a random effect to account for the fact that the samples are not statistically independent (two gut sections were analyzed for each individual).
+```{r}
+#Merge haplotype counts
+PHYLOSEQ.merged.tree.rare.class<-tax_glom(PHYLOSEQ.merged.tree.rare,"Class",NArm = F)
+taxa_names(PHYLOSEQ.merged.tree.rare.class)<-tax_table(PHYLOSEQ.merged.tree.rare.class)[,3]
+
+SEQ_COUNTS<-rev(sort(taxa_sums(PHYLOSEQ.merged.tree.rare.class)))
+SUBSET<-names(SEQ_COUNTS)[SEQ_COUNTS>10000]
+
+PHYLOSEQ.merged.tree.rare.class.abundant<-prune_taxa(taxa_names(PHYLOSEQ.merged.tree.rare.class)%in%SUBSET,PHYLOSEQ.merged.tree.rare.class)
+
+mdf = psmelt(PHYLOSEQ.merged.tree.rare.class.abundant)
+
+p = ggplot(mdf, aes_string(x = "ID_individual", y = "Abundance", fill = "Class",order="Class"))+theme_bw(base_size = 12)
+p = p + geom_bar(stat = "identity", position = "stack")
+p = p + facet_grid(.~sample_type, scales = "free",space="free",margins = F)
+p
+```
+
+#10. Divergence in composition analyzed by unconstrained ordination
+We compare compositional divergence using Bray-Curtis and weighted [UniFrac](https://aem.asm.org/content/71/12/8228) dissimilarities. Both take into account the realtive abundance ASVs. In addition, UniFrac places less weight on phylogenetically related ASVSs, whereas Bray-Curtis does not consider phylogeny. Note that dissimilarities based only on the presence/absence of ASVs may also be useful for certain purposes. 
+Principal Coordinate Analysis (**ordinate()**) searches for the most important gradients (i.e., those that explain the most variation) in dissimilarity matrices. The position of the samples along the first two gradients is then displayed using **plot_ordination()**.
+Next, we use the adonis function (i.e., PERMANOVA) to statistically test for differences in composition between the two gut sections. Note that PERMANOVA allows analysis of pseudoreplicated samples with restricted permutations (the **by=** argument). Hovewer, this can be problematic in certain circumstances. Therefore, you can use, for example, mixed models for distance data from the [MDMR](https://cran.r-project.org/web/packages/MDMR/vignettes/mdmr-vignette.html) package.
+```{r}
+#Bray Curtis and UniFrac dissimilarities
+WU<-UniFrac(PHYLOSEQ.merged.tree.rare, weighted = T)
+BC<-vegdist(otu_table(PHYLOSEQ.merged.tree.rare))
+# as.matrix(WU)[1:8,1:8]
+
+#PCoA ordination
+BC.ord<-ordinate(PHYLOSEQ.merged.tree.rare,method = "PCoA",distance = BC)
+WU.ord<-ordinate(PHYLOSEQ.merged.tree.rare,method = "PCoA",distance = WU)
+
+#Vizualization of first two gradients
+plot_ordination(PHYLOSEQ.merged.tree.rare,BC.ord,color = "sample_type")+ggtitle("PCoA for Bray-Curtis")
+plot_ordination(PHYLOSEQ.merged.tree.rare,WU.ord,color = "sample_type")+ggtitle("PCoA for weighted UniFrac")
+
+#PERMANOVA
+DF<-sample_data(PHYLOSEQ.merged.tree.rare)
+adonis(BC~DF$sample_type)
+adonis(WU~DF$sample_type)
+```

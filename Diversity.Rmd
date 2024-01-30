@@ -1,0 +1,372 @@
+---
+title: "Untitled"
+author: "Jakub Kreisinger"
+date: "12/9/2022"
+output: html_document
+---
+
+```{r }
+library(phyloseq)
+library(vegan)
+library(ggplot2)
+library(ape)
+library(ggplot2)
+library(Polychrome)
+
+dupl.concensus<-function(PHYLOS,NAMES){
+  
+  # exclude nonduplicated samples
+  IDS<-as.character(data.frame(sample_data(PHYLOS))[,NAMES])
+  IDS.dupl<-IDS[duplicated(IDS)]
+  
+  PHYLOSEQ<-prune_samples(IDS%in%IDS.dupl, PHYLOS)
+  if(length(IDS.dupl)*2<length(IDS)) {NONUPLICATED<-prune_samples(!IDS%in%IDS.dupl, PHYLOS)
+  print(paste("Following names are nonduplicated",sample_names(NONUPLICATED)))}
+  
+  CATS<-as.character(data.frame(sample_data(PHYLOSEQ))[,NAMES])
+  CATS2<-levels(factor(CATS))
+  OTU_TAB<-otu_table(PHYLOSEQ)
+  rownames(OTU_TAB)<-CATS
+  
+  # i<-5
+  for (i in 1:length(CATS2))
+  {
+    # print(CATS2[i])
+    FILTER.act<-colSums(OTU_TAB[rownames(OTU_TAB)==CATS2[i],]>0)>1
+    OTU_TAB[rownames(OTU_TAB)==CATS2[i],]
+    OTU_TAB[rownames(OTU_TAB)==CATS2[i],]<-t(apply(OTU_TAB[rownames(OTU_TAB)==CATS2[i],],1,function(x) x*FILTER.act))
+  }
+  
+  rownames(OTU_TAB)<-sample_names(PHYLOSEQ)
+  otu_table(PHYLOSEQ)<-OTU_TAB
+  PHYLOSEQ.clean<-prune_taxa(taxa_sums(PHYLOSEQ)>0,PHYLOSEQ)
+  
+  PHYLOSEQ.clean
+}
+
+#This script merge technical duplicates (specifired in "NAMES" argument)
+merge.duplicates<-function(PHYLOSEQ,NAMES){
+  CATS<-as.character(data.frame(sample_data(PHYLOSEQ))[,NAMES])
+  sample_data(PHYLOSEQ)$duplic.id<-CATS
+  SAMDAT<-sample_data(PHYLOSEQ)
+  SAMDAT.sub<-subset(SAMDAT,duplicated(CATS)==F)
+  FASTA<-refseq(PHYLOSEQ)
+  rownames(SAMDAT.sub)<-SAMDAT.sub$duplic.id
+  PHYLOSEQ.merge<-merge_samples(PHYLOSEQ,"duplic.id")
+  sample_data(PHYLOSEQ.merge)<-SAMDAT.sub
+  PHYLOSEQ.merge<-merge_phyloseq(PHYLOSEQ.merge,FASTA)
+  PHYLOSEQ.merge
+}
+
+manage_unassigned<-function(PHYLOSEQ,UNASS_STRING=NA,ADD,AFTER=TRUE){
+   TAXall<-data.frame(tax_table(PHYLOSEQ),stringsAsFactors = F)
+   if(!is.na(UNASS_STRING)){TAXall[UNASS_STRING]<-NA}
+   # TAXall<-as.character(TAXall[i,])
+   for(i in 1:dim(TAXall)[1]){  
+       TAX<-as.character(TAXall[i,])
+       if(AFTER==TRUE) {for(j in 2: length(TAX)){
+                            if(is.na(TAX[j])){TAX[j]<-ifelse(regexpr(ADD,TAX[j-1])>0,
+                                           TAX[j-1],paste(TAX[j-1],ADD,sep=""))}}}
+      if(AFTER==FALSE) {for(j in 2: length(TAX)){
+                            if(is.na(TAX[j])){TAX[j]<-ifelse(regexpr(ADD,TAX[j-1])>0,
+                                     TAX[j-1],ADD,paste(TAX[j-1],sep=""))}}}
+      TAXall[i,]<-TAX
+    }
+   TAXA<-colnames(TAXall)
+   SPECIES<-rownames(TAXall)
+   TAXall<-tax_table(TAXall)
+   taxa_names(TAXall)<-SPECIES
+   colnames(TAXall)<-TAXA
+   tax_table(PHYLOSEQ)<-TAXall
+  
+   #output
+   PHYLOSEQ
+}
+
+
+load("/media/kreising/DATA/data/Radka_Janet/DADA_PHYLOSEQ/PHYLOSEQ_dupl.R")
+```
+
+## Konyistence v diverzite
+
+*Z analyz konzistence nejdriv vyhazuju mock shield PCR kontrola kitom*
+-ty se muzou na dodatacne analyzy pouzit pozdeji<br>
+<br>
+**Tyhle vzoky maji malo nebo zadne sekvence, vyhazuju je z analyz konzistence:**
+S116_SV87_F_trus1R - nejsou zadne sekvence (jen pro R2) <br>
+S185_IP64_F_trus1R - nejsou zadne sekvence (jen pro R2)<br>
+S99_LU05_F_trus1R - nejsou zadne sekvence (jen pro R2)<br>
+S80_MS93_F_trus2R - < 200 sekvenci<br>
+S40_MC08_F_trus2R - < 200 sekvenci<br>
+
+
+
+```{r}
+# sample_names(PHYLOSEQ_dupl)
+FILTER<-regexpr("^S[0-9]",sample_names(PHYLOSEQ_dupl))>0
+PHYLOSEQ_dupl.sub<-prune_samples(FILTER,PHYLOSEQ_dupl)
+
+EXCLUDE<-c("S116_SV87_F_trus1R","S185_IP64_F_trus1R","S99_LU05_F_trus1R",
+           "S80_MS93_F_trus2R","S40_MC08_F_trus2R")
+EXCLUDE_pairs<-gsub("_F_trus[12]R","",EXCLUDE)
+
+
+PHYLOSEQ_dupl.sub2<-prune_samples(!sample_data(PHYLOSEQ_dupl.sub)$ID%in%EXCLUDE_pairs,
+                                  PHYLOSEQ_dupl.sub)
+PHYLOSEQ_dupl.excl<-prune_samples(sample_data(PHYLOSEQ_dupl.sub)$ID%in%EXCLUDE_pairs,
+                                  PHYLOSEQ_dupl.sub)
+
+DUPL1<-prune_samples(regexpr("_F_trus1R",sample_names(PHYLOSEQ_dupl.sub2))>0,
+                    PHYLOSEQ_dupl.sub2)
+DUPL2<-prune_samples(regexpr("_F_trus2R",sample_names(PHYLOSEQ_dupl.sub2))>0,
+                    PHYLOSEQ_dupl.sub2)
+
+# View(data.frame(sample_names(DUPL1),
+#                 sample_names(DUPL2)))
+
+RICH1<-estimate_richness(DUPL1)
+RICH2<-estimate_richness(DUPL2)
+
+cor.test(RICH1$Shannon,RICH2$Shannon)
+
+# ABS<-abs(RICH1$Shannon-RICH2$Shannon)
+# names(ABS)<-sample_names(DUPL1)
+# rev(sort(ABS))
+
+plot(RICH1$Shannon,RICH2$Shannon)
+
+```
+
+## Konzistence ve slozeni
+
+Porovnavam duplikaty pomoci prokrustovske analyzy zalozene na Bray-Curtis distancich. Vychazi to celkem pekne. Zadne na prvni pohled ulitle vzorky tam nevidim.
+
+```{r}
+DUPL1.prop<-transform_sample_counts(DUPL1,function(x) x/sum(x))
+DUPL2.prop<-transform_sample_counts(DUPL2,function(x) x/sum(x))
+
+BC1<-vegdist(otu_table(DUPL1.prop))
+BC2<-vegdist(otu_table(DUPL2.prop))
+
+BC1.pc<-pcoa(BC1)$vectors
+BC2.pc<-pcoa(BC2)$vectors
+
+PR<-protest(BC1.pc,BC2.pc)
+PR
+
+plot(PR)
+```
+## Slucovani duplikatu
+
+Slucuji vsechny duplikaty. ASV, ktere nejsou v obou duplikatech vyhazuju. To vede k pomerne znacnemu poklesu ASV 14 000 vs 4 000 ale celkovy pocet sekvenci to moc neovlivni. K duplikovanym vzorkum jeste pridavam i neduplikovane, ale pouze ty ASV, ktere byly potvrzene pro duplikovane vzorky a nebo ktere meli v danem vzorku aspon 1% sekvenci.   
+```{r}
+
+CONC<-dupl.concensus(PHYLOS=PHYLOSEQ_dupl.sub2,NAMES="ID")
+MERGED<-merge.duplicates(PHYLOSEQ = CONC,NAMES="ID")
+
+sum(otu_table(PHYLOSEQ_dupl.sub2))
+sum(otu_table(CONC))
+sum(otu_table(MERGED))
+
+PHYLOSEQ_dupl.sub2
+MERGED
+# sort(sample_sums(MERGED))
+
+```
+
+```{r}
+PHYLOSEQ_dupl.excl.fin<-prune_samples(sample_sums(PHYLOSEQ_dupl.excl)>1000,
+                                      PHYLOSEQ_dupl.excl)
+PHYLOSEQ_dupl.excl.fin.prop<-transform_sample_counts(PHYLOSEQ_dupl.excl.fin,function(x) x/sum(x))
+
+FILT1<-taxa_names(PHYLOSEQ_dupl.excl.fin)%in%taxa_names(MERGED)
+FILT2<-apply(otu_table(PHYLOSEQ_dupl.excl.fin.prop),2,max)>0.01
+
+FILT12<-FILT1+FILT2>0
+# sum(FILT12)
+
+NONDUPL<-prune_taxa(FILT12,PHYLOSEQ_dupl.excl.fin)
+
+PHYLOSEQ.final<-merge_phyloseq(MERGED,NONDUPL)
+
+```
+
+
+```{r}
+# View(data.frame(unname(tax_table(PHYLOSEQ.final))))
+FILTa<-is.na(as.character(tax_table(PHYLOSEQ.final)[,2]))
+FF<-(FILTa)==0
+
+PHYLOSEQ.final<-prune_taxa(FF,PHYLOSEQ.final)
+```
+
+# Pridat metadata
+
+V tabulce o Vas menim "S188_SŠ74" za "S188_SS74" a "S84_TE85" za "S84_TE83"
+
+```{r}
+MET<-read.delim("/media/kreising/DATA/data/Radka_Janet/External_data/metadata_narko.txt")
+# head(MET)
+
+MET.nondupl<-MET[duplicated(MET$ID_individual)==F,]
+MET.id<-paste0("S",MET.nondupl$ID_individual)
+sample_data(PHYLOSEQ.final)$ID[!sample_data(PHYLOSEQ.final)$ID %in%MET.id]
+MET.id[!MET.id%in%sample_data(PHYLOSEQ.final)$ID ]
+
+MET.id<-gsub("S188_SŠ74", "S188_SS74",MET.id)
+MET.id<-gsub("S84_TE85", "S84_TE83",MET.id)
+
+SD<-sample_data(MET.nondupl)
+sample_names(SD)<-MET.id
+
+PHYLOSEQ.final
+sample_data(PHYLOSEQ.final)<-SD
+PHYLOSEQ.final
+```
+
+
+```{r}
+save(PHYLOSEQ.final,file = "/media/kreising/DATA/data/Radka_Janet/DADA_PHYLOSEQ/PHYLOSEQ.final.R")
+```
+
+# Alfa diversita
+
+Tem datum jeste moc nerozumim, jeste se to tom pobavime, jak s tim pracovat. Kazdopadne ASV richness vypada, ze je mirne zvysena u Diseaseout, ale signifikantni to neni.  
+
+```{r}
+summary(as.factor(sample_data(PHYLOSEQ.final)$Disease))
+
+PHYLOSEQ.final.rare<-rarefy_even_depth(PHYLOSEQ.final)
+PHYLOSEQ.final.prop<-transform_sample_counts(PHYLOSEQ.final,function(x) x/sum(x))
+
+RICH<-estimate_richness(PHYLOSEQ.final.rare)
+
+RICH<-data.frame(RICH,sample_data(PHYLOSEQ.final.rare))
+
+ggplot(RICH,aes(x=Disease,y=Shannon))+geom_boxplot(outlier.shape = NA)+geom_jitter()
+ggplot(RICH,aes(x=Disease,y=Observed))+geom_boxplot(outlier.shape = NA)+geom_jitter()
+
+summary(lm(Shannon~Disease,data=RICH))
+summary(lm(log10(Observed)~Disease,data=RICH))
+
+summary(aov(Shannon~Disease,data=RICH))
+summary(aov(log10(Observed)~Disease,data=RICH))
+```
+
+# Beta diversita - Bray Curtis
+U IH vidim mirny posum podel prvni osy smerem doprava a to same bi myslim, ze je videt i u NT_1. Kazdopadne permanova vychazi nesignifikantne. To se ale muze zmenit az se pobavime, jak ty analyzy upravit.
+```{r}
+BC<-vegdist(otu_table(PHYLOSEQ.final.prop))
+ord<-ordinate(PHYLOSEQ.final.prop,method = "PCoA", BC)
+plot_ordination(PHYLOSEQ.final.prop,ord,color="Disease")
+plot_ordination(PHYLOSEQ.final.prop,ord,color="Disease")+facet_wrap(.~Disease)
+
+SD<-data.frame(sample_data(PHYLOSEQ.final.prop))
+
+adonis2(BC~Disease,data=SD)
+
+BETA<-betadisper(BC,SD$Disease)
+anova(BETA)
+boxplot(BETA)
+TukeyHSD(BETA)
+```
+# Beta diversita - Jaccard
+Na zaklade jaccard to vypada jak na posuny ve slozeni, tak i na celkove vetsi "rozprsklost" hlavne u skupin out. Jeste udelam podrobnejsi analyzy, aby se lip videlo co za tim je. 
+```{r}
+JA<-vegdist(data.frame(otu_table(PHYLOSEQ.final.rare)),method = "jaccard",binary = T)
+ord<-ordinate(PHYLOSEQ.final.prop,method = "PCoA", JA)
+plot_ordination(PHYLOSEQ.final.prop,ord,color="Disease")
+plot_ordination(PHYLOSEQ.final.prop,ord,color="Disease")+facet_wrap(.~Disease)
+
+SD<-data.frame(sample_data(PHYLOSEQ.final.prop))
+
+adonis2(JA~Disease,data=SD)
+
+BETA<-betadisper(JA,SD$Disease)
+anova(BETA)
+boxplot(BETA)
+TukeyHSD(BETA)
+```
+
+# Taxonomicke slozeni - genus
+
+```{r fig.width=15,fig.height=10}
+#Colour palette with 25 colours
+P25<-createPalette(25, c("#010101", "#ff0000"), M=1000)
+names(P25)<-NULL
+P25<-P25[c(25,2:24,1)]
+#24 most abundant genera
+
+PHYLOSEQ.final.prop.2<-manage_unassigned(PHYLOSEQ=PHYLOSEQ.final.prop,UNASS_STRING=NA,ADD="",AFTER=TRUE)
+
+ta7.prop = tapply(taxa_sums(PHYLOSEQ.final.prop.2), tax_table(PHYLOSEQ.final.prop.2)[, "Genus"], sum, na.rm = TRUE)/dim(otu_table(PHYLOSEQ.final.prop.2))[1]
+# rev(sort(ta7.prop)) 
+top8phyla = names(sort(ta7.prop, TRUE))[1:24]
+#Low-abundance taxa are flagged as "others"
+TAXO<-(tax_table(PHYLOSEQ.final.prop.2)[,6])
+TAXO[!TAXO %in% c(top8phyla)] <- "others"
+tax_table(PHYLOSEQ.final.prop.2)[,6]<-as.character(TAXO)
+#Phyloseq to long format data.frame()
+mdf = psmelt(PHYLOSEQ.final.prop.2)
+mdf$Genus<-factor(mdf$Genus, levels = c(top8phyla,"others"))
+
+#sort genera by abundance
+SORT.vect<-rev(sort(tapply(mdf$Abundance, mdf$Genus, sum)))
+SORT.vect.others<-SORT.vect[grep("others",names(SORT.vect))]
+SORT.vect.rest<-SORT.vect[-grep("others",names(SORT.vect))]
+SORT.vect<-c(SORT.vect.rest,SORT.vect.others)
+#ggplot barplots
+ta3 = ggplot(mdf, aes_string(x = "Sample", y = "Abundance", fill = "Genus",order="Genus"))+theme_bw(base_size = 12)
+ta3 = ta3 + geom_bar(stat = "identity", position = "stack")
+ta3= ta3 + theme(axis.title.x=element_blank(),axis.text.x = element_text(size = 7, angle = 90),axis.text.y = element_text(hjust = 0,size=10))
+ta3 <- ta3 + facet_grid(.~Disease, scales = "free",space="free")+theme(strip.text = element_text(size = 10, angle = 0))
+ta3<-ta3+scale_fill_manual(values = P25)
+ta3<-ta3+theme(legend.position="bottom",
+               legend.text=element_text(size=8), 
+               axis.ticks.x = element_blank(), 
+               strip.text.x = element_text(size = 8))
+
+ta3
+```
+
+
+# Taxonomicke slozeni - class
+
+```{r fig.width=15,fig.height=10}
+#Colour palette with 25 colours
+P25<-createPalette(25, c("#010101", "#ff0000"), M=1000)
+names(P25)<-NULL
+P25<-P25[c(25,2:24,1)]
+#24 most abundant genera
+
+PHYLOSEQ.final.prop.2<-manage_unassigned(PHYLOSEQ=PHYLOSEQ.final.prop,UNASS_STRING=NA,ADD="",AFTER=TRUE)
+
+ta7.prop = tapply(taxa_sums(PHYLOSEQ.final.prop.2), tax_table(PHYLOSEQ.final.prop.2)[, "Class"], sum, na.rm = TRUE)/dim(otu_table(PHYLOSEQ.final.prop.2))[1]
+# rev(sort(ta7.prop)) 
+top8phyla = names(sort(ta7.prop, TRUE))[1:24]
+#Low-abundance taxa are flagged as "others"
+TAXO<-(tax_table(PHYLOSEQ.final.prop.2)[,3])
+TAXO[!TAXO %in% c(top8phyla)] <- "others"
+tax_table(PHYLOSEQ.final.prop.2)[,3]<-as.character(TAXO)
+#Phyloseq to long format data.frame()
+mdf = psmelt(PHYLOSEQ.final.prop.2)
+mdf$Class<-factor(mdf$Class, levels = c(top8phyla,"others"))
+
+#sort genera by abundance
+SORT.vect<-rev(sort(tapply(mdf$Abundance, mdf$Class, sum)))
+SORT.vect.others<-SORT.vect[grep("others",names(SORT.vect))]
+SORT.vect.rest<-SORT.vect[-grep("others",names(SORT.vect))]
+SORT.vect<-c(SORT.vect.rest,SORT.vect.others)
+#ggplot barplots
+ta3 = ggplot(mdf, aes_string(x = "Sample", y = "Abundance", fill = "Class",order="Class"))+theme_bw(base_size = 12)
+ta3 = ta3 + geom_bar(stat = "identity", position = "stack")
+ta3= ta3 + theme(axis.title.x=element_blank(),axis.text.x = element_text(size = 7, angle = 90),axis.text.y = element_text(hjust = 0,size=10))
+ta3 <- ta3 + facet_grid(.~Disease, scales = "free",space="free")+theme(strip.text = element_text(size = 10, angle = 0))
+ta3<-ta3+scale_fill_manual(values = P25)
+ta3<-ta3+theme(legend.position="bottom",
+               legend.text=element_text(size=8), 
+               axis.ticks.x = element_blank(), 
+               strip.text.x = element_text(size = 8))
+
+ta3
+```
